@@ -6,7 +6,7 @@
  */
 
 export default {
-	async email(message, env, ctx) {
+	async email(message, env, _ctx) {
 		// Get email routing configuration (now a proper object)
 		const emailRouting = env.EMAIL_ROUTING || {};
 		console.log(`Processing email from ${message.from} to ${message.to}`);
@@ -44,6 +44,7 @@ export default {
 				env,
 				new Error(`No routing rule found for recipient: ${recipient}`),
 				null,
+				null, // No email content needed for routing rule errors
 			);
 			return;
 		}
@@ -60,15 +61,24 @@ export default {
 				error,
 			);
 
+			// Extract email content once to avoid ReadableStream disturbance
+			let emailContent = null;
+			try {
+				const emailStream = await message.raw;
+				emailContent = await new Response(emailStream).text();
+			} catch (contentError) {
+				console.error("Failed to extract email content:", contentError);
+			}
+
 			// Save email to R2 bucket as backup
-			await saveEmailToR2(message, env, targetEmail);
+			await saveEmailToR2(message, env, targetEmail, emailContent);
 
 			// Send Discord alert
-			await sendDiscordAlert(message, env, error, targetEmail);
+			await sendDiscordAlert(message, env, error, targetEmail, emailContent);
 		}
 	},
 
-	async fetch(request, env, ctx) {
+	async fetch(_request, _env, _ctx) {
 		return new Response("Fail-Safe Email Worker is running");
 	},
 };
@@ -76,17 +86,24 @@ export default {
 /**
  * Save email to R2 bucket as backup
  */
-async function saveEmailToR2(message, env, targetEmail) {
+async function saveEmailToR2(message, env, targetEmail, emailContent) {
 	try {
 		const timestamp = new Date().toISOString();
 		const filename = `email-backup-${timestamp}-${message.from.replace(/[^a-zA-Z0-9]/g, "_")}.eml`;
 
-		// Get email content as ArrayBuffer
-		const emailStream = await message.raw;
-		const emailContent = await new Response(emailStream).arrayBuffer();
+		// Convert email content to ArrayBuffer if provided, otherwise read from stream
+		let emailBuffer;
+		if (emailContent) {
+			const encoder = new TextEncoder();
+			emailBuffer = encoder.encode(emailContent).buffer;
+		} else {
+			// Fallback: read from stream if content not provided
+			const emailStream = await message.raw;
+			emailBuffer = await new Response(emailStream).arrayBuffer();
+		}
 
 		// Save to R2
-		await env.EMAIL_STORAGE.put(filename, emailContent, {
+		await env.EMAIL_STORAGE.put(filename, emailBuffer, {
 			httpMetadata: {
 				contentType: "message/rfc822",
 			},
@@ -109,13 +126,38 @@ async function saveEmailToR2(message, env, targetEmail) {
 /**
  * Send Discord alert for failed email delivery
  */
-async function sendDiscordAlert(message, env, error, targetEmail) {
+async function sendDiscordAlert(message, env, error, targetEmail, emailContent) {
 	try {
 		const webhookUrl = env.DISCORD_WEBHOOK_URL;
 
 		if (!webhookUrl) {
 			console.error("DISCORD_WEBHOOK_URL not configured");
 			return;
+		}
+
+		// Process email content for display
+		let displayContent = "Unable to read email content";
+		if (emailContent) {
+			try {
+				// Try to extract the body from the email content
+				// Look for common email body patterns
+				const bodyMatch = emailContent.match(/(?:\r?\n){2,}(.*)/s);
+				if (bodyMatch) {
+					displayContent = bodyMatch[1].trim();
+					// Limit content to 1000 characters to avoid Discord field limits
+					if (displayContent.length > 1000) {
+						displayContent = displayContent.substring(0, 997) + "...";
+					}
+				} else {
+					// If no body found, use a portion of the raw content
+					displayContent = emailContent.length > 1000 
+						? emailContent.substring(0, 997) + "..." 
+						: emailContent;
+				}
+			} catch (contentError) {
+				console.error("Failed to process email content:", contentError);
+				displayContent = "Error processing email content";
+			}
 		}
 
 		const embed = {
@@ -142,6 +184,11 @@ async function sendDiscordAlert(message, env, error, targetEmail) {
 					name: "Subject",
 					value: message.headers.get("subject") || "No Subject",
 					inline: true,
+				},
+				{
+					name: "Email Content",
+					value: `\`\`\`${displayContent}\`\`\``,
+					inline: false,
 				},
 				{
 					name: "Error",
