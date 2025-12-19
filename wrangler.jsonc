@@ -1,13 +1,26 @@
 /**
  * For more details on how to configure Wrangler, refer to:
  * https://developers.cloudflare.com/workers/wrangler/configuration/
+ * 
+ * Environments:
+ * - Production (default): Deploy with `wrangler deploy`
+ * - Dev: Deploy with `wrangler deploy --env dev` or `wrangler dev --env dev`
+ *   The dev environment deploys as "fail-safe-mail-dev" and uses a separate R2 bucket
+ *   for testing without affecting production.
  */
 {
 	"name": "fail-safe-mail",
 	"main": "src/index.js",
 	"compatibility_date": "2025-09-11",
+	"$schema": "./node_modules/wrangler/config-schema.json",
+	"compatibility_flags": [
+	  "nodejs_compat"
+	],
 	"observability": {
 		"enabled": true
+	},
+	"ai": {
+		"binding": "AI"
 	},
 	"r2_buckets": [
 		{
@@ -17,21 +30,62 @@
 	],
 	"vars": {
 		"EMAIL_ROUTING": {
-			"navin@ecofreshdrycleaner.com": "ndundigalla@gmail.com",
-			"hello@ecofreshdrycleaner.com": "ndundigalla@gmail.com",
-			"tanuj@ecofreshdrycleaner.com": "tanujsiripurapu@gmail.com",
-			"@ecofreshdrycleaner.com": "tanujsiripurapu@gmail.com",
-
-			"tanuj@tarotcardlady.net": "tanujsiripurapu@gmail.com",
-			"christine@tarotcardlady.net": "losgatosdraperylady@gmail.com",
-			"@tarotcardlady.net": "tanujsiripurapu@gmail.com",
-
-			"tanuj@draperylady.net": "tanujsiripurapu@gmail.com",
-			"christine@draperylady.net": "losgatosdraperylady@gmail.com",
-			"@draperylady.net": "tanujsiripurapu@gmail.com",
-
 			"@tanuj.xyz": "tanujsiripurapu@gmail.com",
 			"@default": "tanujsiripurapu@gmail.com"
+		}
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "RETAIL_EMAIL_AGENT",
+				"class_name": "RetailEmailAgent"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": [
+				"RetailEmailAgent"
+			]
+		}
+	],
+	"env": {
+		"dev": {
+			"ai": {
+				"binding": "AI"
+			},
+			"r2_buckets": [
+				{
+					"binding": "EMAIL_STORAGE",
+					"bucket_name": "fail-safe-mail-storage-dev"
+				}
+			],
+			"vars": {
+				"MAILGUN_DOMAIN": "mail.tanuj.xyz",
+				"INTERNAL_FROM_EMAIL": "agent@tanuj.xyz",
+				"INTERNAL_DELIVERY_MODE": "mailgun",
+				"EMAIL_ROUTING": {
+					"@tanuj.xyz": "tanujsiripurapu@gmail.com",
+					"@default": "tanujsiripurapu@gmail.com"
+				}
+			},
+			"durable_objects": {
+				"bindings": [
+					{
+						"name": "RETAIL_EMAIL_AGENT",
+						"class_name": "RetailEmailAgent"
+					}
+				]
+			},
+			"migrations": [
+				{
+					"tag": "v1",
+					"new_sqlite_classes": [
+						"RetailEmailAgent"
+					]
+				}
+			]
 		}
 	}
 	/**

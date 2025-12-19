@@ -13,5 +13,13 @@
 		"prettier": "3.6.2",
 		"vitest": "~3.2.0",
 		"wrangler": "^4.35.0"
+	},
+	"dependencies": {
+		"@ai-sdk/openai": "^2.0.73",
+		"@cloudflare/ai-utils": "^1.0.1",
+		"agents": "^0.2.32",
+		"ai": "^5.0.102",
+		"mimetext": "^3.0.27",
+		"zod": "^3.25.76"
 	}
 }

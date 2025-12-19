@@ -1,9 +1,17 @@
 /**
- * Fail-Safe Email Worker
+ * Fail-Safe Email Worker with AI Agent
  *
- * Forwards incoming emails to configured target addresses based on recipient
- * If delivery fails, saves email to R2 bucket and alerts Discord webhook
+ * Forwards incoming emails to configured target addresses based on recipient.
+ * Uses an AI agent to analyze customer emails and generate helpful replies
+ * before forwarding the email chain to the destination.
+ * If delivery fails, saves email to R2 bucket and alerts Discord webhook.
  */
+
+import { RetailEmailAgent } from "./agent.js";
+import { sendWithMailgun } from "./mailgun.js";
+
+// Export the agent class for Durable Objects
+export { RetailEmailAgent };
 
 export default {
 	async email(message, env, _ctx) {
@@ -50,14 +58,127 @@ export default {
 		}
 
 		try {
-			// Forward the email to the target address
-			await message.forward(targetEmail);
-			console.log(
-				`Email from ${message.from} to ${recipient} successfully forwarded to ${targetEmail}`,
+			// Extract email content for agent analysis
+			let emailContent = null;
+			let emailBody = null;
+			let emailSubject = message.headers.get("subject") || "No Subject";
+			
+			try {
+				const emailStream = await message.raw;
+				emailContent = await new Response(emailStream).text();
+				
+				// Extract the email body, handling both simple and multipart MIME emails
+				emailBody = extractPlainTextBody(emailContent);
+			} catch (contentError) {
+				console.error("Failed to extract email content:", contentError);
+				// If we can't read the email, just forward it
+				try {
+					await message.forward(targetEmail);
+					console.log(
+						`Email from ${message.from} to ${recipient} forwarded to ${targetEmail} (no agent analysis due to content read error)`,
+					);
+				} catch (forwardError) {
+					console.error("Failed to forward email:", forwardError);
+					// Save email to R2 bucket as backup
+					await saveEmailToR2(message, env, targetEmail, null);
+					// Send Discord alert
+					await sendDiscordAlert(message, env, forwardError, targetEmail, null);
+				}
+				return;
+			}
+
+			// Get or create agent instance
+			const agentNamespace = env.RETAIL_EMAIL_AGENT;
+			if (!agentNamespace) {
+				console.warn("Agent namespace not configured, forwarding email without agent analysis");
+				try {
+					await message.forward(targetEmail);
+					console.log(`Email forwarded to ${targetEmail} (no agent analysis)`);
+				} catch (forwardError) {
+					console.error("Failed to forward email:", forwardError);
+					// Save email to R2 bucket as backup
+					await saveEmailToR2(message, env, targetEmail, emailContent);
+					// Send Discord alert
+					await sendDiscordAlert(message, env, forwardError, targetEmail, emailContent);
+				}
+				return;
+			}
+
+			// Create a unique ID for this email thread (use customer email)
+			// Using a consistent ID per customer allows the agent to maintain context
+			const agentId = agentNamespace.idFromName(`email-${message.from}`);
+			const agent = agentNamespace.get(agentId);
+
+			// Analyze email with agent by calling the method via fetch
+			// Agents expose methods via HTTP endpoints
+			console.log("Analyzing email with AI agent...");
+			
+			const analysisResponse = await agent.fetch(
+				new Request("https://agent/internal/analyze", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({
+						emailContent: emailBody,
+						customerEmail: message.from,
+						subject: emailSubject,
+					}),
+				}),
 			);
+
+			const analysis = await analysisResponse.json();
+
+			if (analysis.canReply && analysis.replyContent) {
+				console.log("Agent generated a reply, sending reply to customer...");
+				
+				// Send reply to customer via Mailgun with targetEmail CC'd to preserve the original chain
+				try {
+					await sendReplyToCustomer(
+						env,
+						message,
+						analysis.replyContent,
+						emailSubject,
+						targetEmail, // CC targetEmail
+						emailBody // Pass the already-extracted email body
+					);
+					console.log(`Reply sent successfully via Mailgun to customer (CC: ${targetEmail})`);
+				} catch (replyError) {
+					console.error("Failed to send reply via Mailgun:", replyError);
+					// Try to forward the original message as fallback ONLY
+					try {
+						await message.forward(targetEmail);
+						console.log("Forwarded original message as fallback after Mailgun reply failure");
+					} catch (forwardError) {
+						console.error("Failed to forward message as fallback:", forwardError);
+						// Save email to R2 bucket as backup
+						await saveEmailToR2(message, env, targetEmail, emailContent);
+						// Send Discord alert
+						await sendDiscordAlert(message, env, forwardError, targetEmail, emailContent);
+					}
+				}
+				
+				console.log(
+					`Email from ${message.from} to ${recipient} processed by agent and reply sent (CC: ${targetEmail})`,
+				);
+			} else {
+				console.log(`Agent determined email should be forwarded without reply: ${analysis.reason}`);
+				
+				// Forward the original message
+				try {
+					await message.forward(targetEmail);
+					console.log(
+						`Email from ${message.from} to ${recipient} forwarded to ${targetEmail} (no reply generated)`,
+					);
+				} catch (forwardError) {
+					console.error("Failed to forward email:", forwardError);
+					// Save email to R2 bucket as backup
+					await saveEmailToR2(message, env, targetEmail, emailContent);
+					// Send Discord alert
+					await sendDiscordAlert(message, env, forwardError, targetEmail, emailContent);
+				}
+			}
 		} catch (error) {
 			console.error(
-				`Failed to forward email from ${message.from} to ${recipient}:`,
+				`Failed to process email from ${message.from} to ${recipient}:`,
 				error,
 			);
 
@@ -70,11 +191,19 @@ export default {
 				console.error("Failed to extract email content:", contentError);
 			}
 
-			// Save email to R2 bucket as backup
-			await saveEmailToR2(message, env, targetEmail, emailContent);
+			// Try to forward the original message as fallback
+			try {
+				await message.forward(targetEmail);
+				console.log("Successfully forwarded email after agent error");
+			} catch (forwardError) {
+				console.error("Failed to forward email after agent error:", forwardError);
+				
+				// Save email to R2 bucket as backup
+				await saveEmailToR2(message, env, targetEmail, emailContent);
 
-			// Send Discord alert
-			await sendDiscordAlert(message, env, error, targetEmail, emailContent);
+				// Send Discord alert
+				await sendDiscordAlert(message, env, error, targetEmail, emailContent);
+			}
 		}
 	},
 
@@ -82,6 +211,195 @@ export default {
 		return new Response("Fail-Safe Email Worker is running");
 	},
 };
+
+/**
+ * Extract plain text body from email content, handling both simple and multipart MIME emails
+ */
+function extractPlainTextBody(emailContent) {
+	// Find the boundary between headers and body
+	const headerBodySplit = emailContent.match(/(.*?)(?:\r?\n){2,}(.*)/s);
+	if (!headerBodySplit) {
+		return emailContent.trim();
+	}
+	
+	const headers = headerBodySplit[1];
+	const body = headerBodySplit[2];
+	
+	// Check if it's a multipart email by looking at headers
+	const contentTypeMatch = headers.match(/Content-Type:\s*multipart\/[^;]+;\s*boundary="?([^"\r\n\s]+)"?/i);
+	
+	if (contentTypeMatch) {
+		const boundary = contentTypeMatch[1].trim();
+		// Escape special regex characters in boundary
+		const escapedBoundary = boundary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+		
+		// Split body by boundary markers (--boundary or --boundary--)
+		const boundaryPattern = new RegExp(`--${escapedBoundary}(?:--)?`, 'g');
+		const parts = body.split(boundaryPattern);
+		
+		// Look for text/plain part
+		for (const part of parts) {
+			// Skip empty parts
+			if (!part.trim()) continue;
+			
+			// Check if this part is text/plain
+			if (part.match(/Content-Type:\s*text\/plain/i)) {
+				// Extract content after part headers (double newline or end of part)
+				const partBodyMatch = part.match(/(?:.*?)(?:\r?\n){2,}(.*?)(?:\r?\n--|$)/s) || 
+				                      part.match(/(?:.*?)(?:\r?\n){2,}(.*)/s);
+				if (partBodyMatch) {
+					const text = partBodyMatch[1].trim();
+					// Remove trailing boundary markers if present
+					const cleanedText = text.replace(/--\s*$/, '').trim();
+					if (cleanedText) return cleanedText;
+				}
+			}
+		}
+		
+		// If no text/plain found, try to extract from text/html and convert
+		for (const part of parts) {
+			if (!part.trim()) continue;
+			
+			if (part.match(/Content-Type:\s*text\/html/i)) {
+				const partBodyMatch = part.match(/(?:.*?)(?:\r?\n){2,}(.*?)(?:\r?\n--|$)/s) || 
+				                      part.match(/(?:.*?)(?:\r?\n){2,}(.*)/s);
+				if (partBodyMatch) {
+					// Basic HTML tag removal
+					let text = partBodyMatch[1].trim();
+					// Remove trailing boundary markers if present
+					text = text.replace(/--\s*$/, '').trim();
+					text = text.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+					if (text) return text;
+				}
+			}
+		}
+		
+		// If still nothing, try any text/* part
+		for (const part of parts) {
+			if (!part.trim()) continue;
+			
+			if (part.match(/Content-Type:\s*text\//i)) {
+				const partBodyMatch = part.match(/(?:.*?)(?:\r?\n){2,}(.*?)(?:\r?\n--|$)/s) || 
+				                      part.match(/(?:.*?)(?:\r?\n){2,}(.*)/s);
+				if (partBodyMatch) {
+					const text = partBodyMatch[1].trim();
+					// Remove trailing boundary markers if present
+					const cleanedText = text.replace(/--\s*$/, '').trim();
+					if (cleanedText) return cleanedText;
+				}
+			}
+		}
+	}
+	
+	// For simple emails, return the body after headers
+	return body.trim();
+}
+
+/**
+ * Escape HTML special characters
+ */
+function escapeHtml(text) {
+	const map = {
+		"&": "&amp;",
+		"<": "&lt;",
+		">": "&gt;",
+		'"': "&quot;",
+		"'": "&#039;",
+	};
+	return text.replace(/[&<>"']/g, (m) => map[m]);
+}
+
+/**
+ * Format quoted plain text for email replies
+ */
+function formatQuotedPlain({ date, from, body }) {
+	return `\n\nOn ${date}, ${from} wrote:\n\n${body.split("\n").map((line) => `> ${line}`).join("\n")}`;
+}
+
+/**
+ * Format quoted HTML for email replies
+ */
+function formatQuotedHtml({ date, from, body }) {
+	const escapedBody = escapeHtml(body).replaceAll("\n", "<br>");
+	return `
+    <div style="border-left: 3px solid #ccc; padding-left: 12px; margin-top: 20px; color: #666; font-size: 13px;">
+      <div style="margin-bottom: 8px;">
+        <strong>On ${escapeHtml(date)}, ${escapeHtml(from)} wrote:</strong>
+      </div>
+      <div style="white-space: pre-wrap;">${escapedBody}</div>
+    </div>
+  `.trim();
+}
+
+/**
+ * Send reply email to customer using Mailgun
+ * 
+ * Sends a reply back to the customer with the agent's response via Mailgun.
+ * The reply is properly formatted with In-Reply-To headers to maintain email threading.
+ * CCs targetEmail to preserve the original chain.
+ * Includes the original message in quoted format.
+ * 
+ * @param {Object} env - Environment variables (for Mailgun config)
+ * @param {Object} originalMessage - Original email message
+ * @param {string} replyContent - Agent-generated reply content
+ * @param {string} originalSubject - Original email subject
+ * @param {string} ccEmail - Email address to CC on the reply (targetEmail)
+ * @param {string} originalBody - Original email body text (already extracted)
+ */
+async function sendReplyToCustomer(env, originalMessage, replyContent, originalSubject, ccEmail, originalBody) {
+	const replyTo = originalMessage.from;
+	const fromEmail = env.INTERNAL_FROM_EMAIL || originalMessage.to;
+
+	const subject = originalSubject.toLowerCase().startsWith("re:")
+		? originalSubject
+		: `Re: ${originalSubject}`;
+
+	const originalMessageId =
+		originalMessage.headers.get("Message-ID") ||
+		originalMessage.headers.get("message-id");
+
+	const headers = {};
+	if (originalMessageId) {
+		headers["In-Reply-To"] = originalMessageId;
+		headers["References"] = originalMessageId;
+	}
+
+	const originalDate =
+		originalMessage.headers.get("Date") ||
+		originalMessage.headers.get("date") ||
+		new Date().toUTCString();
+
+	// Use provided originalBody or fallback if not provided
+	const bodyText = originalBody || "[Original message body unavailable in this reply context]";
+
+	const quotedPlain = formatQuotedPlain({
+		date: originalDate,
+		from: replyTo,
+		body: bodyText,
+	});
+
+	const htmlBody = `
+    <div style="font-family: Arial, sans-serif; font-size:14px; line-height:1.4;">
+      <div>${escapeHtml(replyContent).replaceAll("\n", "<br>")}</div>
+      ${formatQuotedHtml({ date: originalDate, from: replyTo, body: bodyText })}
+    </div>
+  `.trim();
+
+	const textBody = `${replyContent}\n\n${quotedPlain}`;
+
+	await sendWithMailgun(env, {
+		to: replyTo,
+		from: fromEmail,
+		subject,
+		text: textBody,
+		html: htmlBody,
+		headers,
+		tag: env.MAILGUN_TAG,
+		cc: ccEmail,
+	});
+
+	console.log(`Reply sent successfully via Mailgun to ${replyTo} (CC: ${ccEmail})`);
+}
 
 /**
  * Save email to R2 bucket as backup
