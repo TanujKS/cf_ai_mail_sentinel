@@ -11,7 +11,7 @@
 {
 	"name": "fail-safe-mail",
 	"main": "src/index.js",
-	"compatibility_date": "2025-09-11",
+	"compatibility_date": "2025-09-06",
 	"$schema": "./node_modules/wrangler/config-schema.json",
 	"compatibility_flags": [
 	  "nodejs_compat"
