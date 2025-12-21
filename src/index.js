@@ -385,6 +385,7 @@ export default {
 			// Using a consistent ID per customer allows the agent to maintain context
 			const agentId = agentNamespace.idFromName(`email-${message.from}`);
 			const agent = agentNamespace.get(agentId);
+			agent.setName("retail-email");
 
 			// Analyze email with agent by calling the method via fetch
 			// Agents expose methods via HTTP endpoints

@@ -17,6 +17,106 @@ const model = openai("gpt-4o-2024-11-20");
 
 export class RetailEmailAgent extends Agent {
 	/**
+	 * Cleanup stale MCP server connections
+	 * Removes failed connections and optionally filters by URL pattern and name
+	 * @param {Object} options - Cleanup options
+	 * @param {string} options.keepUrlEndsWith - Keep servers with URLs ending in this string (e.g., "/sse")
+	 * @param {string} options.keepName - Keep servers with this name
+	 */
+	async cleanupMcpServers({ keepUrlEndsWith = "/sse", keepName = "Google Calendar" } = {}) {
+		const mcpState = this.getMcpServers();
+		const entries = Object.entries(mcpState.servers || {});
+
+		// Decide which ones to remove
+		const toRemove = entries.filter(([id, s]) => {
+			// remove anything failed
+			if (s.state !== "ready") return true;
+
+			// optionally remove non-SSE servers
+			if (keepUrlEndsWith && !s.server_url?.endsWith(keepUrlEndsWith)) return true;
+
+			// optionally remove other names
+			if (keepName && s.name !== keepName) return false; // keep other names unless you want global cleanup
+
+			return false;
+		});
+
+		if (toRemove.length === 0) return;
+
+		console.log("Removing MCP servers:", toRemove.map(([id, s]) => ({ id, url: s.server_url, state: s.state })));
+
+		// Remove sequentially (avoid bursts inside DO)
+		for (const [id] of toRemove) {
+			try {
+				await this.removeMcpServer(id);
+			} catch (e) {
+				console.warn("removeMcpServer failed for", id, e?.message || e);
+			}
+		}
+	}
+
+	/**
+	 * Helper function to connect to Google Calendar MCP server
+	 * @param {Request} request - Request object for deriving callbackHost
+	 */
+	async connectToMcpServer(request) {
+		if (!this.env?.MCP_SERVER_URL) {
+			console.warn("MCP_SERVER_URL not configured");
+			return null;
+		}
+
+		// Cleanup stale connections before checking for existing ones
+		await this.cleanupMcpServers({ keepUrlEndsWith: "/sse", keepName: "Google Calendar" });
+
+		// If already connected, reuse it - check for existing READY /sse server
+		const mcpState = this.getMcpServers();
+		const servers = Object.values(mcpState.servers || {});
+		const readySse = servers.find(s =>
+			s.name === "Google Calendar" &&
+			s.state === "ready" &&
+			s.server_url.endsWith("/sse")
+		);
+		if (readySse) return readySse;
+
+		// callbackHost must be the Agent's origin (used for OAuth callbacks if ever needed)
+		const callbackHost = request ? new URL(request.url).origin : undefined;
+
+		// SSE endpoint for your MCP server
+		const origin = new URL(this.env.MCP_SERVER_URL).origin; // ensures scheme/host only
+		const serverUrl = new URL("/sse", origin).toString();   // <-- SSE endpoint
+
+		try {
+			console.log("Connecting to MCP (SSE)", { serverUrl, callbackHost });
+
+			const result = await this.addMcpServer(
+				"Google Calendar",
+				serverUrl,
+				callbackHost,
+				undefined, // agentsPrefix
+				{
+					transport: { type: "sse" }, // <-- force SSE
+				}
+			);
+
+			if (result.state === "authenticating") {
+				console.warn("Unexpected: MCP server asked for auth:", result.authUrl);
+				return null;
+			}
+
+			console.log("Connected to Google Calendar MCP server:", result.id);
+			return result;
+		} catch (error) {
+			if (error?.message?.includes(".name") || error?.message?.includes("setName")) {
+				console.warn("workerd issue #2240 hit; retry on next request:", error.message);
+				return null;
+			}
+			console.error("Failed to connect to MCP server (SSE):", error);
+			return null;
+		}
+	}
+	  
+
+	/**
 	 * Handle HTTP requests to the agent
 	 */
 	async fetch(request) {
@@ -29,6 +129,7 @@ export class RetailEmailAgent extends Agent {
 				body.emailContent,
 				body.customerEmail,
 				body.subject,
+				request, // Pass request for MCP connection context
 			);
 			return new Response(JSON.stringify(analysis), {
 				headers: { "Content-Type": "application/json" },
@@ -45,39 +146,110 @@ export class RetailEmailAgent extends Agent {
 	 * 
 	 * Uses generateText with Zod-schema tools - the LLM can directly call tools
 	 * to get product information and generate a reply.
+	 * @param {Request} request - Request object for MCP connection context
 	 */
-	async analyzeAndReply(emailContent, customerEmail, subject) {
+	async analyzeAndReply(emailContent, customerEmail, subject, request) {
 		try {
 			// Access AI binding through env (Durable Objects have env available)
 			if (!this.env || !this.env.AI) {
 				throw new Error("AI binding not available. Make sure 'ai' binding is configured in wrangler.jsonc");
 			}
 
+			// Get calendar tools from MCP server if configured
+			let calendarTools = {};
+			if (this.env?.MCP_SERVER_URL) {
+				try {
+					// Connect to MCP server if not already connected (pass request for context)
+					await this.connectToMcpServer(request);
+					
+					// Check MCP server state - find the READY SSE server specifically
+					const mcpState = this.getMcpServers();
+					const entries = Object.entries(mcpState.servers || {});
+
+					// Pick the READY server that is the SSE endpoint
+					const ready = entries.find(([id, s]) =>
+						s.name === "Google Calendar" &&
+						s.state === "ready" &&
+						s.server_url.endsWith("/sse")
+					);
+
+					const serverId = ready?.[0];
+					const calendarServer = ready?.[1];
+
+					if (serverId && calendarServer && this.mcp) {
+						// Server is ready, try to get tools
+						try {
+							// Ensure discovery has completed
+							const discoverResult = await this.mcp.discoverIfConnected(serverId, { timeoutMs: 15000 });
+							if (discoverResult?.success) {
+								// Now get tools - JSON schema validator should be initialized
+								const mcpTools = this.mcp.getAITools();
+								if (mcpTools && Object.keys(mcpTools).length > 0) {
+									calendarTools = mcpTools;
+									console.log("Using MCP calendar tools:", Object.keys(calendarTools));
+								} else {
+									console.warn("MCP server ready but no tools returned from getAITools()");
+								}
+							} else {
+								console.warn("Discovery not yet complete, tools not available");
+							}
+						} catch (getToolsError) {
+							// If JSON schema validator isn't initialized yet, log and continue without tools
+							if (getToolsError.message?.includes("jsonSchema")) {
+								console.warn("MCP tools not yet initialized (JSON schema validator not ready), will retry on next request");
+							} else {
+								console.error("Error getting MCP tools:", getToolsError);
+							}
+						}
+					} else {
+						console.warn("Google Calendar MCP server (SSE) not found in ready state");
+					}
+				} catch (error) {
+					console.error("Error getting MCP tools:", error);
+				}
+			}
+
+			// Combine all available tools
+			const allTools = {
+				...productTools,
+				...calendarTools,
+			};
+
+			console.log("Calendar tools:", this.env.MCP_SERVER_URL);
 			// Create the system prompt for the agent
 			const systemPrompt = `You are a customer service AI agent for a retail business.
 
-Your task is to analyze incoming customer emails and decide whether you can fully and correctly answer the customer using ONLY the available product catalog tools.
+Your task is to analyze incoming customer emails and decide whether you can fully and correctly answer or schedule a consultation for the customer using the available tools.
 
 Available tools:
+Product Catalog:
 - getProductInfo: detailed info for a specific product
 - searchProducts: search products by keyword
 - getPricing: pricing for a specific product
 - getAllProducts: list all products
 
+Calendar/Scheduling${Object.keys(calendarTools).length > 0 ? ':' : ' (not available)'}
+${Object.keys(calendarTools).length > 0 ? `- getAvailability: check available time slots for scheduling consultations
+- createConsultation: create a new consultation/meeting in the calendar
+- rescheduleConsultation: reschedule an existing consultation
+- cancelConsultation: cancel a scheduled consultation` : ''}
+
 Rules:
-1. You may ONLY answer questions that can be resolved using product catalog data (products, pricing, availability, categories, comparisons).
-2. If the email asks about anything outside the product catalog — including but not limited to:
+1. You may answer questions that can be resolved using:
+   - Product catalog data (products, pricing, availability, categories, comparisons)
+   ${Object.keys(calendarTools).length > 0 ? '- Calendar/scheduling tools (checking availability, creating/rescheduling/canceling consultations)' : ''}
+2. If the email asks about anything outside these capabilities — including but not limited to:
    - order status
    - shipping
    - returns or refunds
    - complaints
    - account issues
-   - support issues
+   - support issues (unless they involve scheduling)
    you MUST NOT answer and must indicate the email should be forwarded to a human.
 3. If you need product information to answer, call the appropriate tools first.
-4. Be friendly, professional, and concise in replies.
-5. Do NOT guess or hallucinate information.
-6. Do NOT mention internal tools, policies, or that you are an AI.
+${Object.keys(calendarTools).length > 0 ? '4. If the customer wants to schedule, reschedule, or cancel a consultation, use the calendar tools.\n5. When scheduling, first check availability using getAvailability, then create the consultation.' : '4.'} Be friendly, professional, and concise in replies.
+${Object.keys(calendarTools).length > 0 ? '6' : '5'}. Do NOT guess or hallucinate information.
+${Object.keys(calendarTools).length > 0 ? '7' : '6'}. Do NOT mention internal tools, policies, or that you are an AI.
 
 OUTPUT FORMAT (MANDATORY):
 You MUST respond with valid JSON and nothing else.
@@ -114,8 +286,8 @@ ${emailContent}`;
 			const result = await generateText({
 				model: model,
 				system: systemPrompt,
-				prompt: `Please analyze this customer email and provide a helpful response. Use the available tools to look up any product information you need. If you can answer the customer's question, write a friendly reply. If you cannot (e.g., order status, returns, complaints), explain that the email will be forwarded to a human agent.`,
-				tools: productTools,
+				prompt: `Please analyze this customer email and provide a helpful response. Use the available tools to look up any product information or manage calendar appointments as needed. If you can answer the customer's question, write a friendly reply. If you cannot (e.g., order status, returns, complaints), explain that the email will be forwarded to a human agent.`,
+				tools: allTools,
 				experimental_output: Output.object({
 					schema: responseSchema,
 				}),

@@ -32,7 +32,11 @@
 		"EMAIL_ROUTING": {
 			"@tanuj.xyz": "tanujsiripurapu@gmail.com",
 			"@default": "tanujsiripurapu@gmail.com"
-		}
+		},
+		// MCP Server Configuration (for Google Calendar tools)
+		// Set these as secrets in production: wrangler secret put MCP_SERVER_URL
+		// MCP_SERVER_URL: "https://my-mcp-server.tanujsiripurapu.workers.dev"
+		// MCP_SHARED_SECRET: "your-shared-secret-here"
 	},
 	"durable_objects": {
 		"bindings": [
