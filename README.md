@@ -7,6 +7,7 @@ A Cloudflare Email Worker that forwards incoming emails to multiple target addre
 - ✅ Routes emails to different addresses based on recipient (configurable via environment variables)
 - ✅ Automatic backup to R2 bucket when delivery fails
 - ✅ Discord webhook alerts for failed deliveries
+- ✅ Google Calendar integration for scheduling consultations (via MCP server)
 - ✅ Comprehensive error handling and logging
 - ✅ Full test coverage
 
@@ -83,6 +84,39 @@ npm run deploy
 2. Add your domain
 3. Configure the worker to handle incoming emails
 4. Set up email forwarding rules
+
+### 7. Set Up Google Calendar MCP (Optional)
+
+The agent can schedule consultations using Google Calendar tools. To enable this:
+
+**Prerequisites:**
+- A deployed Google Calendar MCP server (see [my-mcp-server README](../my-mcp-server/README.md))
+- Completed OAuth setup on your MCP server
+
+**Configuration:**
+
+For production, set the MCP server URL as a Wrangler secret:
+
+```bash
+wrangler secret put MCP_SERVER_URL
+# Enter: https://your-mcp-server.your-account.workers.dev
+```
+
+For local development, add to `.dev.vars`:
+
+```bash
+MCP_SERVER_URL=https://your-mcp-server.your-account.workers.dev
+```
+
+**Note:** The agent connects via the SSE endpoint which doesn't require authentication. Just provide the base URL of your MCP server (the agent will automatically append `/sse`).
+
+Once configured, the agent will have access to these calendar tools:
+- `getAvailability` - Check available time slots
+- `createConsultation` - Create calendar events
+- `rescheduleConsultation` - Update event times
+- `cancelConsultation` - Delete events
+
+The agent will automatically use these tools when customers request scheduling in their emails.
 
 ## How It Works
 
@@ -211,6 +245,10 @@ Update the bucket name in `wrangler.jsonc`:
 ]
 ```
 
+### Google Calendar MCP
+
+Calendar tools are enabled when `MCP_SERVER_URL` environment variable is set. The agent connects via the SSE endpoint (no authentication required). See step 7 in the Setup section for configuration details.
+
 ## Monitoring
 
 - Check Cloudflare Workers logs for email processing status
@@ -235,6 +273,12 @@ Update the bucket name in `wrangler.jsonc`:
    - Verify webhook URL is correct
    - Check Discord webhook permissions
    - Review worker logs for fetch errors
+
+4. **Calendar tools not working**
+   - Verify `MCP_SERVER_URL` is set to your MCP server base URL
+   - Check that your MCP server is deployed and OAuth is completed
+   - Ensure your MCP server's `/sse` endpoint is accessible
+   - Review agent logs for MCP connection errors
 
 ### Debug Mode
 
