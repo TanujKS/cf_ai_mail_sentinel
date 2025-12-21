@@ -17,7 +17,6 @@ These tools connect to your Google Calendar MCP Server to manage calendar events
 1. **Deployed Google Calendar MCP Server** - Your MCP server should be deployed and accessible
 2. **OAuth Completed** - The MCP server should have completed OAuth setup (tokens stored)
 3. **MCP Server URL** - The base URL of your deployed MCP server (e.g., `https://my-mcp-server.tanujsiripurapu.workers.dev`)
-4. **MCP Shared Secret** - The HMAC shared secret configured in your MCP server
 
 ## Configuration
 
@@ -27,7 +26,6 @@ Add to your `.dev.vars` file:
 
 ```bash
 MCP_SERVER_URL=https://my-mcp-server.tanujsiripurapu.workers.dev
-MCP_SHARED_SECRET=your-shared-secret-here
 ```
 
 ### Option 2: Wrangler Secrets (Production)
@@ -37,28 +35,24 @@ For production, use Wrangler secrets (recommended for security):
 ```bash
 wrangler secret put MCP_SERVER_URL
 # Enter: https://my-mcp-server.tanujsiripurapu.workers.dev
-
-wrangler secret put MCP_SHARED_SECRET
-# Enter: your-shared-secret-here
 ```
 
 ### Option 3: Wrangler Config (Not Recommended for Secrets)
 
-You can also add them directly to `wrangler.jsonc` in the `vars` section, but this is not recommended for production secrets:
+You can also add it directly to `wrangler.jsonc` in the `vars` section, but this is not recommended for production:
 
 ```jsonc
 "vars": {
-  "MCP_SERVER_URL": "https://my-mcp-server.tanujsiripurapu.workers.dev",
-  "MCP_SHARED_SECRET": "your-shared-secret-here"
+  "MCP_SERVER_URL": "https://my-mcp-server.tanujsiripurapu.workers.dev"
 }
 ```
 
 ## How It Works
 
-1. The agent checks for `MCP_SERVER_URL` and `MCP_SHARED_SECRET` in the environment
-2. If both are present, it creates calendar tools that make authenticated HTTP requests to your MCP server
-3. The tools use HMAC authentication (same as the `/mcp` endpoint requires)
-4. The LLM can now use these tools when customers ask about scheduling
+1. The agent checks for `MCP_SERVER_URL` in the environment
+2. If present, it connects to the MCP server using the Agent's built-in MCP client via the SSE endpoint
+3. Once connected, it retrieves the calendar tools directly from the MCP server using `getAITools()`
+4. The tools are automatically made available to the LLM when customers ask about scheduling
 
 ## Tool Usage Examples
 
@@ -86,16 +80,18 @@ The agent can:
 ### Tools Not Available
 
 If calendar tools are not showing up:
-- Check that `MCP_SERVER_URL` and `MCP_SHARED_SECRET` are set in your environment
+- Check that `MCP_SERVER_URL` is set in your environment
 - Verify the MCP server is deployed and accessible
+- Check that the MCP server's `/sse` endpoint is working (this is what the agent connects to)
 - Check the agent logs for initialization errors
+- Ensure OAuth is completed on the MCP server (tokens stored in the MCP server's Durable Object)
 
-### Authentication Errors
+### Connection Errors
 
-If you see authentication errors:
-- Verify `MCP_SHARED_SECRET` matches the secret configured in your MCP server
-- Check that the MCP server's `/mcp` endpoint is working
-- Ensure OAuth is completed on the MCP server
+If you see connection errors:
+- Verify the MCP server is accessible at the URL specified in `MCP_SERVER_URL`
+- Check that the MCP server's `/sse` endpoint is responding
+- Ensure OAuth is completed on the MCP server (the agent uses the MCP server's stored OAuth tokens)
 
 ### OAuth Not Completed
 
