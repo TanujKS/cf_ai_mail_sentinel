@@ -186,6 +186,38 @@
             margin-bottom: 10px;
             font-size: 1.1em;
         }
+
+        .github-links {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            margin-top: 15px;
+        }
+
+        .github-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            color: #667eea;
+            text-decoration: none;
+            padding: 10px 16px;
+            border: 2px solid #667eea;
+            border-radius: 6px;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+
+        .github-link:hover {
+            background: #667eea;
+            color: white;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(102, 126, 234, 0.3);
+        }
+
+        .github-link::before {
+            content: "🔗";
+            font-size: 1.1em;
+        }
     </style>
 </head>
 <body>
@@ -353,11 +385,30 @@
                     <li>Full email metadata stored in R2 for compliance and analysis</li>
                 </ul>
             </div>
+
+            <div class="section">
+                <h2>Source Code</h2>
+                <p>This project is open source and available on GitHub:</p>
+                <div class="github-links">
+                    <a href="https://github.com/TanujKS/FailSafeMail/tree/feat/agent" target="_blank" rel="noopener noreferrer" class="github-link">
+                        FailSafeMail Repository
+                    </a>
+                    <a href="https://github.com/TanujKS/google-calendar-mcp" target="_blank" rel="noopener noreferrer" class="github-link">
+                        Google Calendar MCP Server
+                    </a>
+                </div>
+                <p style="margin-top: 15px; font-size: 0.95em; color: #666;">
+                    The FailSafeMail repository contains the main email worker implementation, while the Google Calendar MCP Server repository contains the separate Cloudflare Worker that provides calendar integration capabilities.
+                </p>
+            </div>
         </div>
 
         <div class="footer">
             <p>Built with ❤️ using Cloudflare Workers and AI</p>
             <p style="margin-top: 10px; font-size: 0.9em;">Fail-Safe Email Worker v1.0</p>
+            <p style="margin-top: 10px; font-size: 0.85em;">
+                <a href="https://github.com/TanujKS/FailSafeMail/tree/feat/agent" target="_blank" rel="noopener noreferrer" style="color: #667eea; text-decoration: none;">View on GitHub</a>
+            </p>
         </div>
     </div>
 </body>
