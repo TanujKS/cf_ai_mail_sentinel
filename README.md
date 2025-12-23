@@ -65,7 +65,6 @@ This application demonstrates a complete AI-powered system using Cloudflare's pl
 - ✅ Discord webhook alerts for failed deliveries
 - ✅ Email threading with proper In-Reply-To headers
 - ✅ Comprehensive error handling and logging
-- ✅ Full test coverage
 
 ## How It Works
 
@@ -209,19 +208,6 @@ npm run deploy
 3. Configure the worker to handle incoming emails
 4. Set up email forwarding rules
 
-### Testing
-
-Run the test suite:
-```bash
-npm test
-```
-
-Test the agent by sending an email to your configured email address. The agent will:
-- Analyze your email
-- Use tools to look up information if needed
-- Generate a helpful reply (if appropriate)
-- Forward the email chain to the configured destination
-
 ## Key Implementation Details
 
 ### AI Agent Implementation
@@ -285,19 +271,6 @@ cf_ai_mail_sentinel/
 - **Google Calendar MCP Server**: [github.com/TanujKS/google-calendar-mcp](https://github.com/TanujKS/google-calendar-mcp)
   - Separate Cloudflare Worker providing calendar integration via MCP protocol
   - Required for calendar scheduling features
-
-## Testing
-
-The test suite covers:
-- Email routing logic
-- R2 backup functionality
-- Discord alerting
-- Error handling scenarios
-
-Run tests:
-```bash
-npm test
-```
 
 ## Monitoring & Debugging
 
